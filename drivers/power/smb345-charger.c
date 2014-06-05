@@ -137,6 +137,19 @@ static bool wpc_en;
 static bool disable_DCIN;
 static int float_volt_setting = 4300;
 
+// tmtmtm
+extern int usbhost_fixed_install_mode;
+extern int usbhost_fastcharge_in_host_mode;
+extern int usbhost_hostmode;
+extern int usbhost_charging_state;
+extern volatile int usbhost_external_power;
+extern volatile int usbhost_charge_slave_devices;
+extern volatile unsigned long usbhost_wake_in_suspend_total_ms;
+extern struct timespec wakeStartTP; // from arch/arm/mach-msm/pm-8x60.c
+extern bool otg_plugged;
+struct timespec lastPowerOn;
+
+
 /* Sysfs interface */
 static DEVICE_ATTR(reg_status, S_IWUSR | S_IRUGO, smb345_reg_show, NULL);
 static DEVICE_ATTR(float_voltage, 0644, smb345_float_voltage_show,
@@ -460,7 +473,36 @@ error:
 
 static irqreturn_t smb345_inok_isr(int irq, void *dev_id)
 {
-	SMB_NOTICE("VBUS_DET = %s\n", gpio_get_value(GPIO_AC_OK) ? "H" : "L");
+	int status = gpio_get_value(GPIO_AC_OK);
+
+	//SMB_NOTICE("smb345_inok_isr VBUS_DET = %s\n", status ? "H" : "L");
+
+	if (status) {
+		struct timespec powerOff;
+		struct timespec timeSinceLastPowerOn;
+		getnstimeofday(&powerOff);
+		timeSinceLastPowerOn = timespec_sub(powerOff,lastPowerOn);
+
+		printk("#:# smb345_inok_isr irq=%d ext power off %lu %lu %lu -------------------------------------\n",irq,
+			lastPowerOn.tv_sec, timeSinceLastPowerOn.tv_sec, timeSinceLastPowerOn.tv_nsec/NSEC_PER_MSEC);
+
+		if(lastPowerOn.tv_sec>0l && timeSinceLastPowerOn.tv_sec<=1l /*&& timeSinceLastPowerOn.tv_nsec/NSEC_PER_MSEC<100l*/) {
+			// tmtmtm: this power-off event is occuring too quickly after the last power-on event - skip it
+			printk("#:# smb345_inok_isr SKIP POWER OFF RESET\n");
+		} else {
+			usbhost_charging_state = 0;
+			usbhost_external_power = 0;
+			usbhost_wake_in_suspend_total_ms = 0l;
+			wakeStartTP.tv_sec = 0l;
+			printk("#:# smb345_inok_isr POWER OFF RESET\n");
+		}
+
+	} else {
+		getnstimeofday(&lastPowerOn);
+
+		printk("#:# smb345_inok_isr irq=%d ext power on; usbhost_charge_slave_devices=%d ---------------\n",
+			irq,usbhost_charge_slave_devices);
+	}
 
 	return IRQ_HANDLED;
 }
@@ -546,7 +588,7 @@ smb345_set_WCInputCurrentlimit(struct i2c_client *client, u32 current_setting)
 		else
 			setting |= 0x20;
 
-		SMB_NOTICE("Set ICL=%u retval =%x setting=%x\n",
+		SMB_NOTICE("#:# Set ICL=%u retval =%x setting=%x\n",
 			current_setting, retval, setting);
 
 		ret = smb345_write(client, smb345_CHRG_CRNTS, setting);
@@ -568,7 +610,7 @@ smb345_set_WCInputCurrentlimit(struct i2c_client *client, u32 current_setting)
 		}
 
 		setting = retval & (~(BIT(4)));
-		SMB_NOTICE("Disable AICL, retval=%x setting=%x\n", retval, setting);
+		SMB_NOTICE("#:# Disable AICL, retval=%x setting=%x\n", retval, setting);
 		ret = smb345_write(client, smb345_VRS_FUNC, setting);
 		if (ret < 0) {
 			dev_err(&client->dev, "%s(): Failed in writing 0x%02x to register"
@@ -625,7 +667,7 @@ static void wireless_isr_work_function(struct work_struct *dat)
 	SMB_NOTICE("wireless state = %d\n", wireless_is_plugged());
 
 	if (otg_on) {
-		SMB_NOTICE("bypass wireless isr due to otg_on\n");
+		SMB_NOTICE("#:# bypass wireless isr due to otg_on\n");
 		return;
 	}
 
@@ -638,7 +680,7 @@ static void wireless_isr_work_function(struct work_struct *dat)
 static void wireless_det_work_function(struct work_struct *dat)
 {
 	if (otg_on) {
-		SMB_NOTICE("bypass wireless isr due to otg_on\n");
+		SMB_NOTICE("#:# bypass wireless isr due to otg_on\n");
 		return;
 	}
 	if (wireless_is_plugged())
@@ -705,7 +747,7 @@ static int smb345_inok_irq(struct smb345_charger *smb)
 		goto fault ;
 	}
 	enable_irq_wake(irq_num);
-	SMB_NOTICE("GPIO pin irq %d requested ok, smb345_INOK = %s\n", irq_num, gpio_get_value(gpio)? "H":"L");
+	SMB_NOTICE("#:# GPIO pin irq %d requested ok, smb345_INOK = %s\n", irq_num, gpio_get_value(gpio)? "H":"L");
 	return 0;
 
 fault:
@@ -725,13 +767,19 @@ static int smb345_configure_otg(struct i2c_client *client)
 		goto error;
        }
 
+	// tmtmtm only if we are NOT in FI mode and if we are NOT being charged
+	if(!usbhost_fixed_install_mode && !usbhost_charging_state) {
 	/* Change "OTG output current limit" to 250mA */
+	  printk("#:# smb345_configure_otg - output current limit to 250mA\n");
       ret = smb345_write(client, smb345_OTG_TLIM_REG, 0x34);
        if (ret < 0) {
 		dev_err(&client->dev, "%s(): Failed in writing"
 			"register 0x%02x\n", __func__, smb345_OTG_TLIM_REG);
 		goto error;
        }
+    } else {
+	  printk("#:# smb345_configure_otg - !output current limit to 250mA\n");
+    }
 
 	/* Enable OTG */
        ret = smb345_update_reg(client, smb345_CMD_REG, 0x10);
@@ -741,6 +789,8 @@ static int smb345_configure_otg(struct i2c_client *client)
 		goto error;
        }
 
+	// tmtmtm only if we are NOT in FI mode and if we are NOT being charged
+	if(!usbhost_fixed_install_mode && !usbhost_charging_state) {
 	/* Change "OTG output current limit" from 250mA to 750mA */
 	ret = smb345_update_reg(client, smb345_OTG_TLIM_REG, 0x08);
        if (ret < 0) {
@@ -748,6 +798,7 @@ static int smb345_configure_otg(struct i2c_client *client)
 			"0x%02x\n", __func__, smb345_OTG_TLIM_REG);
 		goto error;
        }
+    }
 
 	/* Change OTG to Pin control */
        ret = smb345_write(client, smb345_CTRL_REG, 0x65);
@@ -774,10 +825,10 @@ void smb345_otg_status(bool on)
 	struct i2c_client *client = charger->client;
 	int ret;
 
-	SMB_NOTICE("otg function: %s\n", on ? "on" : "off");
+	printk("#:# smb345_otg_status - otg host function %s\n", on ? "on" : "off");
+	//SMB_NOTICE("otg function: %s\n", on ? "on" : "off");
 
 	if (on) {
-		otg_on = true;
 		/* ENABLE OTG */
 		ret = smb345_configure_otg(client);
 		if (ret < 0) {
@@ -785,11 +836,22 @@ void smb345_otg_status(bool on)
 				"otg..\n", __func__);
 			return;
 		}
+
+		otg_on = true;
+		usbhost_hostmode = 1;
+		printk("#:# smb345_otg_status val=%s set usbhost_hostmode=%d ###\n", on ? "on" : "off",usbhost_hostmode);
+
 		if (wireless_is_plugged())
 			wireless_reset();
+
 		return;
-	} else
-		otg_on = false;
+	}
+
+	// tmtmtm TODO MISSING? actually disable otg?
+	otg_on = false;
+	usbhost_hostmode = 0;
+	otg_plugged = false;
+	printk("#:# smb345_otg_status val=%s set usbhost_hostmode=%d ###\n", on ? "on" : "off",usbhost_hostmode);
 
 	if (wireless_is_plugged())
 		wireless_set();
@@ -805,7 +867,7 @@ int smb345_float_volt_set(unsigned int val)
 		SMB_ERR("%s(): val=%d is out of range !\n",__func__, val);
 	}
 
-	printk("%s(): val=%d\n",__func__, val);
+	printk("#:# %s(): val=%d\n",__func__, val);
 
 	ret = smb345_volatile_writes(client, smb345_ENABLE_WRITE);
 	if (ret < 0) {
@@ -848,6 +910,7 @@ int usb_cable_type_detect(unsigned int chgr_type)
 	mutex_lock(&charger->usb_lock);
 
 	if (chgr_type == CHARGER_NONE) {
+		printk("#:# smb345 usb_cable_type_detect CHARGER_NONE %u INOK=H wpc_en=%d\n",chgr_type,wpc_en);
 		SMB_NOTICE("INOK=H\n");
 		if (wpc_en) {
 			if (disable_DCIN) {
@@ -860,40 +923,56 @@ int usb_cable_type_detect(unsigned int chgr_type)
 			}
 		}
 		success =  bq27541_battery_callback(non_cable);
+
+		// tmtmtm
+		usbhost_external_power = 0;
+	    usbhost_charging_state = 0;
+		printk("#:# smb345 usb_cable_type_detect CHARGER_NONE %u usbhost_charging_state=0 ################ usbhost_external_power=0\n",chgr_type);
+
 		touch_callback(non_cable);
 	} else {
+		printk("#:# smb345 usb_cable_type_detect !CHARGER_NONE %u INOK=L\n",chgr_type);
 		SMB_NOTICE("INOK=L\n");
 
+		// tmtmtm (only if !usbhost_charge_slave_devices ?)
+		usbhost_external_power = 1;
+	    usbhost_charging_state = 1;
+		printk("#:# smb345 usb_cable_type_detect !CHARGER_NONE %u usbhost_charging_state=1 ################ usbhost_external_power=1\n",chgr_type);
+
 		if (chgr_type == CHARGER_SDP) {
-			SMB_NOTICE("Cable: SDP\n");
+			SMB_NOTICE("#:# Cable: SDP\n");
 			smb345_vflt_setting();
 			success =  bq27541_battery_callback(usb_cable);
 			touch_callback(usb_cable);
 		} else {
 			if (chgr_type == CHARGER_CDP) {
-				SMB_NOTICE("Cable: CDP\n");
+				SMB_NOTICE("#:# Cable: CDP\n");
 			} else if (chgr_type == CHARGER_DCP) {
-				SMB_NOTICE("Cable: DCP\n");
+				SMB_NOTICE("#:# Cable: DCP\n");
 			} else if (chgr_type == CHARGER_OTHER) {
-				SMB_NOTICE("Cable: OTHER\n");
+				SMB_NOTICE("#:# Cable: OTHER\n");
 			} else if (chgr_type == CHARGER_ACA) {
-				SMB_NOTICE("Cable: ACA\n");
+				//printk("#:# smb345 usb_cable_type_detect ACA\n");
+				SMB_NOTICE("#:# Cable: ACA\n");
+			    usbhost_charging_state = 2;
 			} else {
-				SMB_NOTICE("Cable: TBD\n");
+				SMB_NOTICE("#:# Cable: TBD\n");
 				smb345_vflt_setting();
 				success =  bq27541_battery_callback(usb_cable);
 				touch_callback(usb_cable);
 				goto done;
 			}
+			printk("#:# smb345 usb_cable_type_detect smb345_set_InputCurrentlimit 1200\n");
 			smb345_set_InputCurrentlimit(client, 1200);
 			smb345_vflt_setting();
 			success =  bq27541_battery_callback(ac_cable);
 			touch_callback(ac_cable);
 			if (wpc_en) {
+				printk("#:# smb345 usb_cable_type_detect wpc_en\n");
 				if (delayed_work_pending(&charger->wireless_set_current_work))
 					cancel_delayed_work(&charger->wireless_set_current_work);
 				if (!disable_DCIN) {
-					SMB_NOTICE("AC cable detect, disable wpc_pok, disable DCIN");
+					SMB_NOTICE("#:# AC cable detect, disable wpc_pok, disable DCIN");
 					disable_DCIN = true;
 					disable_irq(gpio_to_irq(charger->wpc_pok_gpio));
 					disable_irq_wake(gpio_to_irq(charger->wpc_pok_gpio));
@@ -907,10 +986,43 @@ int usb_cable_type_detect(unsigned int chgr_type)
 		}
 	}
 done:
+	printk("#:# smb345 usb_cable_type_detect done\n");
 	mutex_unlock(&charger->usb_lock);
 	return success;
 }
 EXPORT_SYMBOL_GPL(usb_cable_type_detect);
+
+// tmtmtm
+void smb345_event_fi(void) {
+    // called by usbhost.c sysfs change from user space
+	if(usbhost_fixed_install_mode>0) {
+	    // from OTG to FI: disable slave charging
+	} else {
+	    // from FI to OTG: enable slave charging
+	}
+}
+//EXPORT_SYMBOL_GPL(smb345_event_fi);
+
+// tmtmtm
+void smb345_event_fastcharge(void) {
+    // called by usbhost.c sysfs change from user space
+	printk("#:# smb345_event_fastcharge chrgstate=%d fast=%d\n",
+			usbhost_charging_state,usbhost_fastcharge_in_host_mode);
+
+	if(usbhost_charging_state) {
+		if(usbhost_fastcharge_in_host_mode) {
+			printk("#:# smb345_event_fastcharge -> usb_cable_type_detect(CHARGER_ACA)\n");
+			usb_cable_type_detect(CHARGER_ACA);
+		} else {
+			printk("#:# smb345_event_fastcharge -> usb_cable_type_detect(CHARGER_DCP)\n");
+			usb_cable_type_detect(CHARGER_DCP);
+		}
+	} else {
+		printk("#:# smb345_event_fastcharge -> no need to do anything\n");
+	}
+}
+//EXPORT_SYMBOL_GPL(smb345_event_fastcharge);
+
 
 /* Sysfs function */
 static ssize_t smb345_reg_show(struct device *dev, struct device_attribute *attr, char *buf)
@@ -1001,13 +1113,18 @@ static int smb345_otg_setting(struct i2c_client *client)
 		goto error;
        }
 
+	if(!usbhost_fixed_install_mode && !usbhost_charging_state) {
 	/* Change "OTG output current limit" to 250mA */
+	  printk("#:# smb345_otg_setting - output current limit to 250mA\n");
 	ret = smb345_update_reg(client, smb345_OTG_TLIM_REG, 0x34);
        if (ret < 0) {
 		dev_err(&client->dev, "%s(): Failed in writing"
 			"register 0x%02x\n", __func__, smb345_OTG_TLIM_REG);
 		goto error;
        }
+    } else {
+	  printk("#:# smb345_otg_setting - !output current limit to 250mA\n");
+    }
 
 	/* Disable volatile writes to registers */
 	ret = smb345_volatile_writes(client, smb345_DISABLE_WRITE);
@@ -1261,7 +1378,7 @@ static int __devinit smb345_probe(struct i2c_client *client,
 	if (!charger)
 		return -ENOMEM;
 
-	printk("smb345_probe+\n");
+	printk("#:# smb345_probe+\n");
 	charger->client = client;
 	charger->dev = &client->dev;
 	i2c_set_clientdata(client, charger);
@@ -1334,7 +1451,7 @@ static int __devinit smb345_probe(struct i2c_client *client,
 		queue_delayed_work(smb345_wq, &charger->wireless_det_work, WPC_INIT_DET_INTERVAL);
 	}
 
-	printk("smb345_probe-\n");
+	printk("#:# smb345_probe-\n");
 
 	return 0;
 error:
@@ -1351,29 +1468,29 @@ static int __devexit smb345_remove(struct i2c_client *client)
 
 static int smb345_suspend(struct i2c_client *client, pm_message_t mesg)
 {
-	printk("smb345_suspend+\n");
+	printk("#:# smb345_suspend+\n");
 	flush_workqueue(smb345_wq);
 	if (ac_on || wireless_on || usb_on)
 		smb345_config_thermal_suspend();
-	printk("smb345_suspend-\n");
+	printk("#:# smb345_suspend-\n");
 	return 0;
 }
 
 static int smb345_resume(struct i2c_client *client)
 {
-	printk("smb345_resume+\n");
+	printk("#:# smb345_resume+\n");
 	if (wireless_on != !(gpio_get_value(charger->wpc_pok_gpio)))
 		wake_lock_timeout(&charger_wakelock, 2*HZ);
-	printk("smb345_resume-\n");
+	printk("#:# smb345_resume-\n");
 	return 0;
 }
 
 void smb345_shutdown(struct i2c_client *client)
 {
-	printk("smb345_shutdown+\n");
+	printk("#:# smb345_shutdown+\n");
 	if (ac_on || wireless_on || usb_on)
 		smb345_config_thermal_suspend();
-	printk("smb345_shutdown-\n");
+	printk("#:# smb345_shutdown-\n");
 }
 
 static const struct i2c_device_id smb345_id[] = {
@@ -1396,6 +1513,8 @@ static struct i2c_driver smb345_i2c_driver = {
 
 static int __init smb345_init(void)
 {
+	lastPowerOn.tv_sec = 0l;
+	lastPowerOn.tv_nsec = 0l;
 	return i2c_add_driver(&smb345_i2c_driver);
 }
 module_init(smb345_init);

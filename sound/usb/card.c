@@ -76,6 +76,12 @@ MODULE_DESCRIPTION("USB Audio");
 MODULE_LICENSE("GPL");
 MODULE_SUPPORTED_DEVICE("{{Generic,USB Audio}}");
 
+// tmtmtm
+int delay_snd_usb_audio = 48; //33;	// 28
+struct timer_list my_timer;
+struct usb_device *postpone_usb_snd_dev = NULL;
+struct device_driver *postpone_usb_snd_drv = NULL;
+extern struct device_driver *current_drv; // from drivers/base/dd.c
 
 static int index[SNDRV_CARDS] = SNDRV_DEFAULT_IDX;	/* Index 0-MAX */
 static char *id[SNDRV_CARDS] = SNDRV_DEFAULT_STR;	/* ID for this card */
@@ -427,6 +433,32 @@ static int snd_usb_audio_create(struct usb_device *dev, int idx,
 	return 0;
 }
 
+//tmtmtm
+static int mykthread(void *unused)
+{
+	int ret=0;
+	//printk("#:# sound/usb/card.c mykthread -> driver_attach\n");
+	if(postpone_usb_snd_drv!=NULL) {
+		printk("#:# sound/usb/card.c mykthread -> driver_attach %s %s\n",
+			postpone_usb_snd_drv->name,postpone_usb_snd_drv->bus->name);
+		ret = driver_attach(postpone_usb_snd_drv);
+		postpone_usb_snd_drv = NULL;
+	}
+	return ret;
+}
+
+void snd_usb_audio_exec_delayed(unsigned long unused)
+{
+	int ret=0;
+	printk("#:# sound/usb/card.c snd_usb_audio_exec_delayed()\n");
+
+	// Must offload to another thread, in order to prevent "BUG: scheduling while atomic"
+	// "calling block IO api(generic_make_request) from a soft irq thread (read callback) is a bad idea"
+	ret = kernel_thread(mykthread, NULL, CLONE_FS | CLONE_FILES | CLONE_SIGHAND | SIGCHLD);
+	//printk("#:# sound/usb/card.c snd_usb_audio_exec_delayed() ret=%d\n",ret);
+}
+//EXPORT_SYMBOL_GPL(snd_usb_audio_exec_delayed);
+
 /*
  * probe the active usb device
  *
@@ -455,6 +487,32 @@ snd_usb_audio_probe(struct usb_device *dev,
 		    le16_to_cpu(dev->descriptor.idProduct));
 	if (quirk && quirk->ifnum >= 0 && ifnum != quirk->ifnum)
 		goto __err_val;
+
+	// tmtmtm: we don't want the USB DAC to become the primary sound card
+	// in order for a USB DAC, connected at boot time, to become available as 
+	// an *overlay* primary sound card, we must postpone device probe
+	if(delay_snd_usb_audio>0) {
+		struct timespec tp; ktime_get_ts(&tp);
+		// on flo, original attemt to register snd-usb-audio strikes a sec 3.85
+		// but we allow it to strike latest by sec 6.99
+		if (tp.tv_sec<7 && postpone_usb_snd_dev==NULL && current_drv!=NULL) {
+			printk("#:# sound/usb/card.c DON'T REGISTER EARLY tv_sec=%d %s %s ++++++++++++++++++++\n",
+				(int)(tp.tv_sec),current_drv->name,current_drv->bus->name);
+		    postpone_usb_snd_dev = dev;
+		    postpone_usb_snd_drv = current_drv;  
+		    init_timer(&my_timer);
+		    my_timer.expires = jiffies + delay_snd_usb_audio*HZ; // n*HZ = delay in number of seconds
+		    my_timer.function = snd_usb_audio_exec_delayed;
+		    add_timer(&my_timer);
+			printk("#:# sound/usb/card.c delayed call to driver_attach initiated\n");
+			goto __err_val;
+		}
+		printk("#:# sound/usb/card.c REGISTER tv_sec=%d ++++++++++++++++++++++++\n",(int)(tp.tv_sec));
+	} else {
+		printk("#:# sound/usb/card.c REGISTER now ++++++++++++++++++++++++\n");
+		err = driver_attach(current_drv);
+	}
+
 
 	if (snd_usb_apply_boot_quirk(dev, intf, quirk) < 0)
 		goto __err_val;

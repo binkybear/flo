@@ -1,0 +1,25 @@
+#
+# Makefile_default in source subdirectory
+#
+
+obj-m           += easycap.o
+
+easycap-y       := easycap_main.o easycap_low.o easycap_sound.o
+easycap-y       += easycap_ioctl.o easycap_settings.o
+easycap-y       += easycap_testcard.o
+easycap-y       += easycap_ioctlmessdefault.o
+
+ccflags-y += -Wall
+
+KERNELDIR ?= /lib/modules/`uname -r`/build
+PWD       := $(shell pwd)
+
+#EXTRA_CFLAGS += -Wframe-larger-than=8192
+export EXTRA_CFLAGS
+
+all:
+	$(MAKE) -C $(KERNELDIR) M=$(PWD) modules
+
+clean:
+	@rm -rf *.o *~ core .depend .*.cmd *.ko *.mod.c .tmp_versions
+

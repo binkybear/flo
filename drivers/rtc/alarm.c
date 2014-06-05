@@ -25,6 +25,9 @@
 
 #include <asm/mach/time.h>
 
+#include <linux/delay.h>	// tmtmtm msleep()
+extern int usbhost_firm_sleep; // tmtmtm
+
 #define ANDROID_ALARM_PRINT_ERROR (1U << 0)
 #define ANDROID_ALARM_PRINT_INIT_STATUS (1U << 1)
 #define ANDROID_ALARM_PRINT_TSET (1U << 2)
@@ -34,7 +37,10 @@
 #define ANDROID_ALARM_PRINT_FLOW (1U << 6)
 
 static int debug_mask = ANDROID_ALARM_PRINT_ERROR | \
-			ANDROID_ALARM_PRINT_INIT_STATUS;
+			ANDROID_ALARM_PRINT_INIT_STATUS
+            | ANDROID_ALARM_PRINT_CALL          // tmtmtm
+            | ANDROID_ALARM_PRINT_SUSPEND       // tmtmtm
+			;
 module_param_named(debug_mask, debug_mask, int, S_IRUGO | S_IWUSR | S_IWGRP);
 
 #define pr_alarm(debug_level_mask, args...) \
@@ -355,30 +361,52 @@ static enum hrtimer_restart alarm_timer_triggered(struct hrtimer *timer)
 	now = base->stopped ? base->stopped_time : hrtimer_cb_get_time(timer);
 	now = ktime_sub(now, base->delta);
 
-	pr_alarm(INT, "alarm_timer_triggered type %d at %lld\n",
-		base - alarms, ktime_to_ns(now));
+	pr_info("#:# alarm_timer_triggered type %d at %lld %d %d\n",
+		base - alarms, ktime_to_ns(now),usbhost_firm_sleep,suspended);
 
 	while (base->first) {
 		alarm = container_of(base->first, struct alarm, node);
 		if (alarm->softexpires.tv64 > now.tv64) {
-			pr_alarm(FLOW, "don't call alarm, %pF, %lld (s %lld)\n",
+			pr_alarm(FLOW, "#:# don't call alarm, %pF, %lld (s %lld)\n",
 				alarm->function, ktime_to_ns(alarm->expires),
 				ktime_to_ns(alarm->softexpires));
 			break;
 		}
 		base->first = rb_next(&alarm->node);
-		rb_erase(&alarm->node, &base->alarms);
-		RB_CLEAR_NODE(&alarm->node);
-		pr_alarm(CALL, "call alarm, type %d, func %pF, %lld (s %lld)\n",
-			alarm->type, alarm->function,
-			ktime_to_ns(alarm->expires),
-			ktime_to_ns(alarm->softexpires));
-		spin_unlock_irqrestore(&alarm_slock, flags);
-		alarm->function(alarm);
-		spin_lock_irqsave(&alarm_slock, flags);
+
+		// tmtmtm ANDROID_ALARM_RTC_WAKEUP=0, ANDROID_ALARM_ELAPSED_REALTIME_WAKEUP=2
+		// see: include/linux/android_alarm.h
+		if((alarm->type==ANDROID_ALARM_RTC_WAKEUP
+		    || alarm->type==ANDROID_ALARM_ELAPSED_REALTIME_WAKEUP
+		    //|| alarm->type==ANDROID_ALARM_ELAPSED_REALTIME
+		    //|| alarm->type==ANDROID_ALARM_RTC
+		   ) && usbhost_firm_sleep && suspended) {
+		  	// skip this wakeup-alarm
+		  	pr_info("#:# skip alarm, type %d, func %pF, %lld (s %lld) firm_sleep=%d suspended=%d\n",
+			    alarm->type, alarm->function,
+			    ktime_to_ns(alarm->expires),
+			    ktime_to_ns(alarm->softexpires),
+			    usbhost_firm_sleep,  // tmtmtm
+			    suspended);  // tmtmtm
+		} else {
+
+			rb_erase(&alarm->node, &base->alarms);
+			RB_CLEAR_NODE(&alarm->node);
+			if(suspended) {
+				pr_info("#:# call alarm, type %d, func %pF, %lld (s %lld) firm_sleep=%d suspended=%d\n",
+					alarm->type, alarm->function,
+					ktime_to_ns(alarm->expires),
+					ktime_to_ns(alarm->softexpires),
+					usbhost_firm_sleep,  // tmtmtm
+					suspended);  // tmtmtm
+			}
+			spin_unlock_irqrestore(&alarm_slock, flags);
+			alarm->function(alarm);
+			spin_lock_irqsave(&alarm_slock, flags);
+        } 
 	}
 	if (!base->first)
-		pr_alarm(FLOW, "no more alarms of type %d\n", base - alarms);
+		pr_alarm(FLOW, "#:# no more alarms of type %d\n", base - alarms);
 	update_timer_locked(base, true);
 	spin_unlock_irqrestore(&alarm_slock, flags);
 	return HRTIMER_NORESTART;
@@ -406,7 +434,7 @@ static int alarm_suspend(struct platform_device *pdev, pm_message_t state)
 	struct alarm_queue *wakeup_queue = NULL;
 	struct alarm_queue *tmp_queue = NULL;
 
-	pr_alarm(SUSPEND, "alarm_suspend(%p, %d)\n", pdev, state.event);
+	pr_alarm(SUSPEND, "#:# alarm_suspend(%p, %d)\n", pdev, state.event);
 
 	spin_lock_irqsave(&alarm_slock, flags);
 	suspended = true;
@@ -424,7 +452,10 @@ static int alarm_suspend(struct platform_device *pdev, pm_message_t state)
 				hrtimer_get_expires(&tmp_queue->timer).tv64 <
 				hrtimer_get_expires(&wakeup_queue->timer).tv64))
 		wakeup_queue = tmp_queue;
+
 	if (wakeup_queue) {
+		pr_info("#:# alarm_suspend(%p, %d) wake_queue\n", pdev, state.event);
+
 		rtc_read_time(alarm_rtc_dev, &rtc_current_rtc_time);
 		getnstimeofday(&wall_time);
 		rtc_tm_to_time(&rtc_current_rtc_time, &rtc_current_time);
@@ -446,7 +477,7 @@ static int alarm_suspend(struct platform_device *pdev, pm_message_t state)
 			rtc_alarm_time, rtc_current_time,
 			rtc_delta.tv_sec, rtc_delta.tv_nsec);
 		if (rtc_current_time + 1 >= rtc_alarm_time) {
-			pr_alarm(SUSPEND, "alarm about to go off\n");
+			pr_info("#:# alarm_suspend(%p, %d) alarm about to go off\n", pdev, state.event);
 			memset(&rtc_alarm, 0, sizeof(rtc_alarm));
 			rtc_alarm.enabled = 0;
 			rtc_set_alarm(alarm_rtc_dev, &rtc_alarm);
@@ -462,7 +493,16 @@ static int alarm_suspend(struct platform_device *pdev, pm_message_t state)
 			spin_unlock_irqrestore(&alarm_slock, flags);
 		}
 	}
+
 	return err;
+}
+
+static int mykthread(void *pdev)
+{
+	msleep(10);
+	pr_info("#:# alarm_resume(%p) done\n", pdev);
+	suspended = false;
+	return 0;
 }
 
 static int alarm_resume(struct platform_device *pdev)
@@ -470,18 +510,24 @@ static int alarm_resume(struct platform_device *pdev)
 	struct rtc_wkalrm alarm;
 	unsigned long       flags;
 
-	pr_alarm(SUSPEND, "alarm_resume(%p)\n", pdev);
+	pr_alarm(SUSPEND, "#:# alarm_resume(%p)\n", pdev);
 
 	memset(&alarm, 0, sizeof(alarm));
 	alarm.enabled = 0;
 	rtc_set_alarm(alarm_rtc_dev, &alarm);
 
 	spin_lock_irqsave(&alarm_slock, flags);
-	suspended = false;
 	update_timer_locked(&alarms[ANDROID_ALARM_RTC_WAKEUP], false);
 	update_timer_locked(&alarms[ANDROID_ALARM_ELAPSED_REALTIME_WAKEUP],
 									false);
 	spin_unlock_irqrestore(&alarm_slock, flags);
+
+	// tmtmtm
+	// delay "suspended = false;" by 20ms, so that immediately following "#:# call alarm" 
+	// will be evaluated with suspended flag still set
+	//suspended = false;
+	//pr_info("#:# alarm_resume(%p) done\n", pdev);
+	kernel_thread(mykthread, pdev, CLONE_FS | CLONE_FILES | CLONE_SIGHAND | SIGCHLD);
 
 	return 0;
 }
@@ -513,7 +559,7 @@ static int rtc_alarm_add_device(struct device *dev,
 	if (err)
 		goto err3;
 	alarm_rtc_dev = rtc;
-	pr_alarm(INIT_STATUS, "using rtc device, %s, for alarms", rtc->name);
+	pr_alarm(INIT_STATUS, "#.# using rtc device, %s, for alarms", rtc->name);
 	mutex_unlock(&alarm_setrtc_mutex);
 
 	return 0;

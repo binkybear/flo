@@ -1629,18 +1629,6 @@ config MSM_CPU_FREQ_MIN
 
 endif # CPU_FREQ_MSM
 
-config MSM_SLEEPER
-	bool "Limit max frequency while screen is off"
-	default y
-	help
-	  Limit max frequency while screen is off
-
-config CPU_VOLTAGE_TABLE
-	bool "Enable CPU Voltage Table via sysfs for adjustements"
-	default n
-	help
-	  Krait User Votlage Control 
-
 config MSM_AVS_HW
 	bool "Enable Adaptive Voltage Scaling (AVS)"
 	default n
@@ -2630,23 +2618,10 @@ config MSM_CPU_PWRCTL
 	  stand alone power collapse operation. Selecting this option
 	  ensures that they are always off.
 
-config FORCE_FAST_CHARGE
-	bool "Force AC charge mode at will"
+config USBHOST  # tmtmtm
+	bool "USBHOST related runtime configuration"
 	default y
-	help
-	  A simple sysfs interface to force adapters that
-	  are detected as USB to charge as AC.
-
-config UPDATE_LCDC_LUT
-	bool "Set initial Qualcomm LCDC lut"
-	default y
-	help
-	  Set initial Qualcomm LCDC Look Up Table.
-
-config LCD_KCAL
-	tristate "MSM generic LCDC Calibration"
-	default y
-	help
-	  Enable MSM generic LCDC temperature Calibration.
+ 	help
+ 	  A simple sysfs interface to allow switching between OTG and FI mode.
 
 endif

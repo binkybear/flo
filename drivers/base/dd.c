@@ -445,6 +445,9 @@ static int __driver_attach(struct device *dev, void *data)
 	return 0;
 }
 
+// tmtmtm
+struct device_driver *current_drv = NULL;
+
 /**
  * driver_attach - try to bind driver to devices.
  * @drv: driver.
@@ -456,6 +459,10 @@ static int __driver_attach(struct device *dev, void *data)
  */
 int driver_attach(struct device_driver *drv)
 {
+	// tmtmtm
+	if(!strcmp(drv->name,"snd-usb-audio"))
+		current_drv = drv;
+
 	return bus_for_each_dev(drv->bus, NULL, drv, __driver_attach);
 }
 EXPORT_SYMBOL_GPL(driver_attach);

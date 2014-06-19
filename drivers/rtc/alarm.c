@@ -372,7 +372,6 @@ static enum hrtimer_restart alarm_timer_triggered(struct hrtimer *timer)
 				ktime_to_ns(alarm->softexpires));
 			break;
 		}
-		base->first = rb_next(&alarm->node);
 
 		// tmtmtm ANDROID_ALARM_RTC_WAKEUP=0, ANDROID_ALARM_ELAPSED_REALTIME_WAKEUP=2
 		// see: include/linux/android_alarm.h
@@ -388,8 +387,27 @@ static enum hrtimer_restart alarm_timer_triggered(struct hrtimer *timer)
 			    ktime_to_ns(alarm->softexpires),
 			    usbhost_firm_sleep,  // tmtmtm
 			    suspended);  // tmtmtm
-		} else {
+			break;
+		}
 
+		base->first = rb_next(&alarm->node);
+/*
+		// tmtmtm ANDROID_ALARM_RTC_WAKEUP=0, ANDROID_ALARM_ELAPSED_REALTIME_WAKEUP=2
+		// see: include/linux/android_alarm.h
+		if((alarm->type==ANDROID_ALARM_RTC_WAKEUP
+		    || alarm->type==ANDROID_ALARM_ELAPSED_REALTIME_WAKEUP
+		    //|| alarm->type==ANDROID_ALARM_ELAPSED_REALTIME
+		    //|| alarm->type==ANDROID_ALARM_RTC
+		   ) && usbhost_firm_sleep && suspended) {
+		  	// skip this wakeup-alarm
+		  	pr_info("#:# skip alarm, type %d, func %pF, %lld (s %lld) firm_sleep=%d suspended=%d\n",
+			    alarm->type, alarm->function,
+			    ktime_to_ns(alarm->expires),
+			    ktime_to_ns(alarm->softexpires),
+			    usbhost_firm_sleep,  // tmtmtm
+			    suspended);  // tmtmtm
+		} else {
+*/
 			rb_erase(&alarm->node, &base->alarms);
 			RB_CLEAR_NODE(&alarm->node);
 			if(suspended) {
@@ -403,7 +421,9 @@ static enum hrtimer_restart alarm_timer_triggered(struct hrtimer *timer)
 			spin_unlock_irqrestore(&alarm_slock, flags);
 			alarm->function(alarm);
 			spin_lock_irqsave(&alarm_slock, flags);
+/*
         } 
+*/
 	}
 	if (!base->first)
 		pr_alarm(FLOW, "#:# no more alarms of type %d\n", base - alarms);

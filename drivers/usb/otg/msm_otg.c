@@ -99,7 +99,7 @@ static int global_vbus_suspend_status;
 static int global_id_pin_suspend_status;
 
 //otg+charge: sysfs entry
-static bool usbhost_charge_mode = true;
+static bool usbhost_charge_mode = false;
 module_param(usbhost_charge_mode, bool, 0755); 
 
 /* APQ8064 GPIO pin definition */

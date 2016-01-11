@@ -5470,7 +5470,7 @@ int hdd_wlan_startup(struct device *dev )
    WLANBAP_ConfigType btAmpConfig;
    hdd_config_t *pConfig;
 #endif
-   //int ret;
+   int ret;
    struct wiphy *wiphy;
 
    ENTER();
